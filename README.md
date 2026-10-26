@@ -29,7 +29,10 @@ Around the model:
 
 - input validation: required columns, missing values, numeric types;
 - emergency thresholds for oil level, pressure, current, vibration and temperature in `config.yaml`;
-- time-series split for evaluation (MAE and R² are written to the log);
+- time-series cross-validation: the ensemble is evaluated on every fold (trained on the past,
+  tested on the future), the log shows MAE and R² per fold plus mean ± std, and the final model
+  is then trained on all data;
+- prediction from the five features alone, for example a single reading passed as a dict;
 - rotating log file `oil_well_ai.log`;
 - the trained model is saved to `oil_well_model.joblib` and loaded on the next start;
 - unit tests for training, prediction and save/load.
@@ -55,7 +58,20 @@ python Hakaton.py
 ```
 
 Running the file starts the unit tests. They delete the old `data.csv` and model, generate new
-synthetic data, train the ensemble and save it.
+synthetic data, train the ensemble and save it. All 3 tests pass; a full run takes about a minute.
+
+Prediction example:
+
+```python
+from Hakaton import IndustrialOilWellAI
+
+ai = IndustrialOilWellAI()  # loads the saved model or trains a new one
+power = ai.predict({
+    "oil_level": 50, "pressure": 10, "current": 3,
+    "vibration": 0.5, "temperature": 40,
+})
+print(power)
+```
 
 ## Project structure
 
@@ -66,12 +82,8 @@ Hakaton/
 └── data.csv       # sample synthetic data
 ```
 
-## Known issues and next steps
+## Next steps
 
-- `predict()` checks input with the same validation as training, so it expects the `optimal_power`
-  column. Predicting from the five features alone currently fails, and `test_prediction` fails with it.
-- `predict()` also applies a separate `RobustScaler` that is never fitted. The pipelines already scale
-  their input, so this step should be removed.
-- Training uses only the last time-series split instead of averaging metrics over all splits.
-- The locale is hard-coded to `ru_RU.UTF-8`, which raises an error on systems without that locale.
-- Train on real well data and report metrics against a simple baseline.
+- Train on real well data and compare the ensemble against a simple baseline (mean or linear model).
+- Use the emergency thresholds from `config.yaml` to flag dangerous readings before prediction.
+- Remove unused imports and split the single file into modules (model, data, logging, tests).

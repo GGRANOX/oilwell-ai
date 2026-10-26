@@ -30,7 +30,11 @@ from io import StringIO
 
 # Настройки для промышленного использования
 warnings.filterwarnings('ignore')
-locale.setlocale(locale.LC_ALL, 'ru_RU.UTF-8')
+try:
+    locale.setlocale(locale.LC_ALL, 'ru_RU.UTF-8')
+except locale.Error:
+    # Локали ru_RU нет в системе (часто на Windows и в Docker) — остаёмся на системной
+    locale.setlocale(locale.LC_ALL, '')
 
 
 class IndustrialLogger:
@@ -118,7 +122,6 @@ class IndustrialOilWellAI:
         # Инициализация моделей
         self.models = self._initialize_models()
         self.ensemble = self._create_ensemble()
-        self.scaler = RobustScaler()
 
         # Конфигурация системы
         self.config = self._load_config()
@@ -297,9 +300,11 @@ class IndustrialOilWellAI:
             self.logger.log_error(f"Ошибка загрузки данных: {str(e)}")
             raise
 
-    def check_data(self, df: pd.DataFrame) -> bool:
-        """Проверка данных перед обучением"""
-        required_columns = self.config['data_columns']['features'] + [self.config['data_columns']['target']]
+    def check_data(self, df: pd.DataFrame, require_target: bool = True) -> bool:
+        """Проверка данных; для предсказания целевой столбец не нужен (require_target=False)"""
+        required_columns = list(self.config['data_columns']['features'])
+        if require_target:
+            required_columns.append(self.config['data_columns']['target'])
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
             self.logger.log_warning(f"Отсутствуют столбцы: {missing_columns}")
@@ -334,19 +339,32 @@ class IndustrialOilWellAI:
             X = df[features]
             y = df[target]
 
-            test_size = self.config['training_params'].get('test_size', 0.2)
             tscv = TimeSeriesSplit(n_splits=self.config['training_params'].get('time_series_split', 5))
 
-            for train_index, test_index in tscv.split(X):
-                X_train, X_test = X.iloc[train_index], X.iloc[test_index]
-                y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+            # Оценка на каждом фолде: копия ансамбля учится на прошлом, проверяется на будущем
+            maes, r2s = [], []
+            for fold, (train_index, test_index) in enumerate(tscv.split(X), start=1):
+                fold_model = clone(self.ensemble)
+                fold_model.fit(X.iloc[train_index], y.iloc[train_index])
+                preds = fold_model.predict(X.iloc[test_index])
+                maes.append(mean_absolute_error(y.iloc[test_index], preds))
+                r2s.append(r2_score(y.iloc[test_index], preds))
+                self.logger.log_operation(f"Фолд {fold}: MAE={maes[-1]:.4f}, R2={r2s[-1]:.4f}")
 
-            self.ensemble.fit(X_train, y_train)
-            preds = self.ensemble.predict(X_test)
+            self.cv_metrics = {
+                'mae_mean': float(np.mean(maes)), 'mae_std': float(np.std(maes)),
+                'r2_mean': float(np.mean(r2s)), 'r2_std': float(np.std(r2s)),
+                'folds': len(maes)
+            }
+            self.logger.log_operation(
+                f"Кросс-валидация ({len(maes)} фолдов): "
+                f"MAE={self.cv_metrics['mae_mean']:.4f} ± {self.cv_metrics['mae_std']:.4f}, "
+                f"R2={self.cv_metrics['r2_mean']:.4f} ± {self.cv_metrics['r2_std']:.4f}"
+            )
 
-            mae = mean_absolute_error(y_test, preds)
-            r2 = r2_score(y_test, preds)
-            self.logger.log_operation(f"Обучение завершено: MAE={mae:.4f}, R2={r2:.4f}")
+            # Финальная модель обучается на всех данных
+            self.ensemble.fit(X, y)
+            self.logger.log_operation("Обучение завершено на всех данных")
 
             self.last_retrain_time = datetime.now()
             joblib.dump(self.ensemble, self.model_path)
@@ -385,22 +403,14 @@ class IndustrialOilWellAI:
             if isinstance(df, dict):  # Если передан словарь, преобразуем в DataFrame
                 df = pd.DataFrame([df])
 
-            if not self.check_data(df):
+            if not self.check_data(df, require_target=False):
                 self.logger.log_error("Данные для предсказания невалидны.")
                 return None
 
             features = self.config['data_columns']['features']
-
-            # Проверим, что все необходимые столбцы есть в данных
-            missing_features = [feature for feature in features if feature not in df.columns]
-            if missing_features:
-                self.logger.log_error(f"Отсутствуют следующие столбцы: {missing_features}")
-                return None
-
             df = df[features]
 
-            # Нормализация данных
-            X_scaled = self.scaler.transform(df)
+            # Масштабирование не нужно: каждый пайплайн ансамбля масштабирует данные сам
 
             # Проверим, что модель обучена
             if not hasattr(self, 'ensemble') or self.ensemble is None:
@@ -409,7 +419,7 @@ class IndustrialOilWellAI:
 
             # Предсказание
             self.logger.log_operation("Предсказание с использованием модели...")
-            predictions = self.ensemble.predict(X_scaled)
+            predictions = self.ensemble.predict(df)
 
             if len(predictions) == 0:
                 self.logger.log_error("Предсказания пусты.")
