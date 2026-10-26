@@ -1,0 +1,20 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+
+# IDE settings
+.idea/
+.vscode/
+
+# Generated at runtime
+*.log
+*.joblib
+
+# OS files
+.DS_Store
+Thumbs.db
